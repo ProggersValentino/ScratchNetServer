@@ -3,9 +3,6 @@
 *.xml
 *.vcxproj.*
 *.vcxproj
-ScatchPacket/x64
+ScatchPacket/x64/Debug/*
 .vs
-x64/
-
-*.dll
-*.lib
+*.exe
