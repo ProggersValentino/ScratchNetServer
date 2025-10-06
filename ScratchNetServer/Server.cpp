@@ -1,18 +1,21 @@
 #include "Server.h"
 #include "Address.h"
-
-#pragma comment(lib, "zlib.lib")
+#include "ScratchPacketHeader.h"
+#include "Payload.h"
+#include "PacketSerialization.h"
 
 void Server::MainProcess()
 {
-    playerAddress.reserve(maxPlayers); //assign amount of players
-    playerConnected.reserve(maxPlayers); //assign amount of players
+    //playerAddress.reserve(maxPlayers); //assign amount of players
+    //playerConnected.reserve(maxPlayers); //assign amount of players
 
     listeningSocket = *RetrieveSocket(); //create new socket
     listeningSocket.OpenSock(30000, true);
 
-    char recieveBuf[13];
-    int size = 13;
+    packetAckMaintence = GenerateScratchAck();
+
+    char recieveBuf[40];
+    int size = 40;
 
     while (true)
     {
@@ -25,9 +28,43 @@ void Server::MainProcess()
             unsigned int from_address = address->GetAddressFromSockAddrIn();
             unsigned int from_port = address->GetPortFromSockAddrIn();
 
+            ScratchPacketHeader* recvHeader = InitEmptyPacketHeader();
+            Payload recievedPayload = *CreateEmptyPayload();
+
             printf("Recieved %d bytes\n", recievedBytes);
             printf("Received package: %s '\n'", recieveBuf);
             printf("from port: %d and ip: %d \n", from_address, from_port);
+
+            DeconstructPacket(recieveBuf, *recvHeader, recievedPayload);
+
+            char tempbuf[15] = { 0 };
+            SerializePayload(recievedPayload, tempbuf);
+
+            /*if (!CompareCRC(*recvHeader, tempbuf))
+            {
+                std::cout << "Failed CRC Check" << std::endl;
+                return;
+            }*/
+
+            std::cout << "CRC Check Succeeded" << std::endl;
+            //packet maintence
+            packetAckMaintence->InsertRecievedSequenceIntoRecvBuffer(recvHeader->sequence); //insert sender's packet sequence into our local recv sequence buf
+
+            packetAckMaintence->OnPacketAcked(recvHeader->ack); //acknowledge the most recent packet that was recieved by the sender
+
+            packetAckMaintence->AcknowledgeAckbits(recvHeader->ack_bits, recvHeader->ack); //acknowledge the previous 32 packets starting from the most recent acknowledged from the sender
+
+            if (recvHeader->sequence < packetAckMaintence->mostRecentRecievedPacket) //is the packet's sequence we just recieved higher than our most recently recieved packet sequence?
+            {
+                packetAckMaintence->mostRecentRecievedPacket = recvHeader->sequence;
+                std::cout << "Packet out of order" << std::endl;
+                return;
+            }
+
+            std::cout << "Packet accepted" << std::endl;
+            
+            //apply changes to other clients 
+
 
             //send echo
             int sendBytes = sendto(listeningSocket.GetSocket(), recieveBuf, size, 0, (SOCKADDR*)&address->sockAddr, sizeof(address->GetSockAddrIn()));

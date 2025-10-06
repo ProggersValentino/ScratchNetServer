@@ -1,8 +1,9 @@
 #pragma once
-#include <queue>
-
 #include "Socket.h"
+#include "ScratchAck.h"
+
 #include <vector>
+#include <queue>
 #include <unordered_map>
 
 class Server
@@ -21,6 +22,8 @@ public:
 private:
     Socket listeningSocket;
     Socket actionSocket;
+
+    ScratchAck* packetAckMaintence;
 
     int maxPlayers = 4;
     int numOfConnectedClients;
