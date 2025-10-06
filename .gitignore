@@ -1,8 +1,5 @@
 *.ipch
 *.hint
 *.xml
-*.vcxproj.*
-*.vcxproj
 ScatchPacket/x64/Debug/*
-.vs
 *.exe
