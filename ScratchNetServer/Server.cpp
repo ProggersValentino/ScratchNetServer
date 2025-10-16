@@ -3,6 +3,7 @@
 #include "ScratchPacketHeader.h"
 #include "Payload.h"
 #include "PacketSerialization.h"
+#include <thread>
 
 void Server::MainProcess()
 {
@@ -16,6 +17,10 @@ void Server::MainProcess()
 
     char recieveBuf[30];
     int size = 30;
+
+    isHeartBeatActive = true;
+
+    std::thread heartBeatWorker(SendHeartBeat); //start heart beat on new thread
 
     while (true)
     {
@@ -67,12 +72,13 @@ void Server::MainProcess()
             }
 
             std::cout << "CRC Check Succeeded" << std::endl;
+            
             //packet maintence
-            packetAckMaintence->InsertRecievedSequenceIntoRecvBuffer(recvHeader.sequence); //insert sender's packet sequence into our local recv sequence buf
+            currentClient->packetAckMaintence->InsertRecievedSequenceIntoRecvBuffer(recvHeader.sequence); //insert sender's packet sequence into our local recv sequence buf
 
-            packetAckMaintence->OnPacketAcked(recvHeader.ack); //acknowledge the most recent packet that was recieved by the sender
+            currentClient->packetAckMaintence->OnPacketAcked(recvHeader.ack); //acknowledge the most recent packet that was recieved by the sender
 
-            packetAckMaintence->AcknowledgeAckbits(recvHeader.ack_bits, recvHeader.ack); //acknowledge the previous 32 packets starting from the most recent acknowledged from the sender
+            currentClient->packetAckMaintence->AcknowledgeAckbits(recvHeader.ack_bits, recvHeader.ack); //acknowledge the previous 32 packets starting from the most recent acknowledged from the sender
 
             if (recvHeader.sequence < packetAckMaintence->mostRecentRecievedPacket) //is the packet's sequence we just recieved higher than our most recently recieved packet sequence?
             {
@@ -80,11 +86,45 @@ void Server::MainProcess()
                 continue;
             }
 
-            packetAckMaintence->mostRecentRecievedPacket = recvHeader.sequence; //only update the most recent sequence if the recieved one is higher than one the stored
+            currentClient->packetAckMaintence->mostRecentRecievedPacket = recvHeader.sequence; //only update the most recent sequence if the recieved one is higher than one the stored
             std::cout << "Packet accepted" << std::endl;
             
-            //apply changes to other clients 
 
+            //apply changes to other clients 
+            
+            Snapshot extractedChanges = Snapshot();
+            Snapshot newBaseline = Snapshot();
+
+
+            //update snapshot baseline
+            switch (recvHeader.packetCode)
+            {
+            case 11:
+                extractedChanges = DeconstructRelativePayload(recievedPayload);
+                newBaseline = ApplyChangesToSnapshot(*currentClient->clientSSRecordKeeper->baselineRecord.recordedSnapshot, extractedChanges);
+                currentClient->clientSSRecordKeeper->InsertNewRecord(recvHeader.sequence, newBaseline);
+                
+                UpdateLocalNetworkedObjectsOnClientRecords(*currentClient, newBaseline); //update all the client record's networkedObject with this change 
+
+                ReplicatedChangeToOtherClients(*currentClient, extractedChanges, 11); //send the change to the other connected clients
+                
+                break;
+
+            case 12:
+                extractedChanges = DeconstructAbsolutePayload(recievedPayload);
+                currentClient->clientSSRecordKeeper->InsertNewRecord(recvHeader.sequence, extractedChanges);
+
+                UpdateLocalNetworkedObjectsOnClientRecords(*currentClient, extractedChanges); //update all the client record's networkedObject with this change 
+             
+                ReplicatedChangeToOtherClients(*currentClient, extractedChanges, 12); //send the change to the other connected clients
+                break;
+            default:
+                break;
+            }
+
+
+           
+            
 
             //send echo
             int sendBytes = sendto(listeningSocket.GetSocket(), recieveBuf, size, 0, (SOCKADDR*)&address->sockAddr, sizeof(address->GetSockAddrIn()));
@@ -96,6 +136,9 @@ void Server::MainProcess()
             }
         }
     }
+
+    heartBeatWorker.join();
+    listeningSocket.Close();
 }
 
 int Server::FindPlayer(Address player)
@@ -133,7 +176,7 @@ const Address& Server::GetClientAddress(int clientIndex)
     return *playerRecord[clientIndex].clientAddress;
 }
 
-const ClientRecord& Server::GetClientRecord(int clientIndex)
+ClientRecord& Server::GetClientRecord(int clientIndex)
 {
     return playerRecord[clientIndex];
 }
@@ -196,4 +239,159 @@ int Server::DetermineClient(Address* clientAddress, ClientRecord* OUTRecord)
         return 0;
     }
     
+}
+
+bool Server::UpdateClientObjects(ClientRecord* clientToUpdate, Snapshot selectedObjectToUpdate)
+{
+    if (clientToUpdate == nullptr)
+    {
+        return false;
+    }
+
+
+    if (!clientToUpdate->TryUpdatingNetworkedObject(selectedObjectToUpdate.objectId, selectedObjectToUpdate))
+    {
+        clientToUpdate->TryInsertNewNetworkObject(selectedObjectToUpdate.objectId, selectedObjectToUpdate);
+    }
+
+    return true;
+}
+
+void Server::UpdateLocalNetworkedObjectsOnClientRecords(ClientRecord clientWithUpdates, Snapshot ObjectChanges)
+{
+    for (int i = 0; i < playerConnected.size(); i++)
+    {
+        std::vector<char> changedValues; //the changes to the data to be sent over
+
+        std::vector<EVariablesToChange> changedVariables;
+
+        ClientRecord& client = GetClientRecord(i);
+
+        UpdateClientObjects(&client, ObjectChanges);
+
+        
+    }
+}
+
+void Server::ReplicateChangeGroupToAllClients()
+{
+    
+    for (int i = 0; i < playerConnected.size(); i++)
+    {
+        if (!playerConnected[i]) //dont need to update a disconnected player
+        {
+            continue;
+        }
+
+       char transmitBuf[30] = { 0 };
+
+        ClientRecord client = GetClientRecord(i);
+
+        for (auto pair = client.networkedObjects.begin(); pair != client.networkedObjects.end(); ++pair)
+        {
+            ScratchPacketHeader heartBeatHeader = ScratchPacketHeader(12, client.clientSSRecordKeeper->baselineRecord.packetSequence, client.packetAckMaintence->currentPacketSequence,
+                client.packetAckMaintence->mostRecentRecievedPacket, client.packetAckMaintence->GetAckBits(client.packetAckMaintence->mostRecentRecievedPacket));
+
+            Payload heartBeatPayload = ConstructAbsolutePayload(pair->second); //grabbing the value 
+
+            ConstructPacket(heartBeatHeader, heartBeatPayload, transmitBuf);
+
+            int sentBytes = listeningSocket.Send(*client.clientAddress, transmitBuf, 30);
+        }
+
+    }
+}
+
+void Server::ReplicateChangeToAllClients(Snapshot changes)
+{
+    for (int i = 0; i < playerConnected.size(); i++)
+    {
+        if (!playerConnected[i]) //dont need to update a disconnected player
+        {
+            continue;
+        }
+
+       char transmitBuf[30] = { 0 };
+
+        ClientRecord& client = GetClientRecord(i);
+
+        ScratchPacketHeader heartBeatHeader = ScratchPacketHeader(12, client.clientSSRecordKeeper->baselineRecord.packetSequence, client.packetAckMaintence->currentPacketSequence,
+            client.packetAckMaintence->mostRecentRecievedPacket, client.packetAckMaintence->GetAckBits(client.packetAckMaintence->mostRecentRecievedPacket));
+
+        Payload heartBeatPayload = ConstructAbsolutePayload(changes); //grabbing the value 
+
+        ConstructPacket(heartBeatHeader, heartBeatPayload, transmitBuf);
+
+        int sentBytes = listeningSocket.Send(*client.clientAddress, transmitBuf, 30);
+
+    }
+}
+
+void Server::ReplicatedChangeToOtherClients(ClientRecord ClientSentChanges, Snapshot changes, int packetCode)
+{
+    for (int i = 0; i < playerConnected.size(); i++)
+    {
+        if (!playerConnected[i]) //dont need to update a disconnected player
+        {
+            continue;
+        }
+
+        char transmitBuf[30] = { 0 };
+
+        ClientRecord& client = GetClientRecord(i);
+
+        if (client == ClientSentChanges)
+        {
+            continue;
+        }
+
+        ScratchPacketHeader heartBeatHeader = ScratchPacketHeader(packetCode, client.clientSSRecordKeeper->baselineRecord.packetSequence, client.packetAckMaintence->currentPacketSequence,
+            client.packetAckMaintence->mostRecentRecievedPacket, client.packetAckMaintence->GetAckBits(client.packetAckMaintence->mostRecentRecievedPacket));
+
+        Payload heartBeatPayload = ConstructAbsolutePayload(changes); //grabbing the value 
+
+        ConstructPacket(heartBeatHeader, heartBeatPayload, transmitBuf);
+
+        int sentBytes = listeningSocket.Send(*client.clientAddress, transmitBuf, 30);
+
+    }
+}
+
+void Server::RelayClientPosition(ClientRecord client)
+{
+    char transmitBuf[30] = { 0 };
+
+
+    ScratchPacketHeader heartBeatHeader = ScratchPacketHeader(22, client.clientSSRecordKeeper->baselineRecord.packetSequence, client.packetAckMaintence->currentPacketSequence,
+        client.packetAckMaintence->mostRecentRecievedPacket, client.packetAckMaintence->GetAckBits(client.packetAckMaintence->mostRecentRecievedPacket)); //sending a packet for the purpose of updating ACK
+
+    Payload heartBeatPayload = ConstructAbsolutePayload(*client.clientSSRecordKeeper->baselineRecord.recordedSnapshot); //grabbing the baseline record to send to client
+
+    ConstructPacket(heartBeatHeader, heartBeatPayload, transmitBuf);
+
+    int sentBytes = listeningSocket.Send(*client.clientAddress, transmitBuf, 30);
+}
+
+
+void Server::SendHeartBeat()
+{
+    while (isHeartBeatActive)
+    {
+        for (int i = 0; i < playerConnected.size(); i++)
+        {
+            if (!playerConnected[i]) //dont need to update a disconnected player
+            {
+                continue;
+            }
+
+            char transmitBuf[30] = { 0 };
+
+            ClientRecord client = GetClientRecord(i); //grabbing a copy of the client record to prevent it from getting entangled with the main thread 
+
+            RelayClientPosition(client); //update the baseline for the client 
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+
 }

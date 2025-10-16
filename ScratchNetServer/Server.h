@@ -20,7 +20,7 @@ public:
     int FindFreeClientIndex() const;
     bool IsClientConnected(int clientIndex);
     const Address& GetClientAddress(int clientIndex);
-    const ClientRecord& GetClientRecord(int clientIndex);
+    ClientRecord& GetClientRecord(int clientIndex);
 
     bool TryToAddPlayer(Address* potentialPlayer, ClientRecord* OUTRecord = nullptr);
 
@@ -37,15 +37,38 @@ public:
     int DetermineClient(Address* clientAddress, ClientRecord* OUTRecord);
 
     
+    bool UpdateClientObjects(ClientRecord* clientToUpdate, Snapshot selectedObjectToUpdate);
+
+    //to update all the connected clients to the current state of the client that sent a packet
+    void UpdateLocalNetworkedObjectsOnClientRecords(ClientRecord clientWithUpdates, Snapshot ObjectChanges);
+
+    //sends changes to all clients connected
+    void ReplicateChangeGroupToAllClients();
+
+    void ReplicateChangeToAllClients(Snapshot changes);
+
+    //used if we have a main sender and only need to update the other clients connected
+    void ReplicatedChangeToOtherClients(ClientRecord ClientSentChanges, Snapshot changes, int packetCode);
+
+    //to synchronize the given client's position 
+    void RelayClientPosition(ClientRecord client);
+
+    //to send each client a packet to update the baseline under packet code 22 every 250ms 
+    void SendHeartBeat();
+
+    
 private:
     Socket listeningSocket;
     Socket actionSocket;
 
     ScratchAck* packetAckMaintence;
 
+    std::unordered_map<int, Snapshot> networkedObjects;
     
     int numOfConnectedClients;
 
     std::array<bool, maxPlayers> playerConnected;
     std::array<ClientRecord, maxPlayers> playerRecord;
+
+    bool isHeartBeatActive = false;
 };
