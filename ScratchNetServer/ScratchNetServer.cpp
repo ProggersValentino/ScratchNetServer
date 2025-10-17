@@ -16,8 +16,9 @@ int main(int argc, char* argv[])
 
     InitializeSockets(); //init sockets
 
-    Server server;
+    Server server = Server();
     
+
     
     printf("starting main process");
     server.MainProcess();

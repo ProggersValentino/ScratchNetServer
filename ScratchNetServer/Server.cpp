@@ -5,37 +5,46 @@
 #include "PacketSerialization.h"
 #include <thread>
 
+std::atomic<bool> shutDownRequested = false;
+
+Server::Server()
+{
+}
+
 void Server::MainProcess()
 {
     //playerRecord.reserve(maxPlayers); //assign amount of players
     //playerConnected.reserve(maxPlayers); //assign amount of players
+
+    SetConsoleCtrlHandler(ConsoleHandler, TRUE);
 
     listeningSocket = *RetrieveSocket(); //create new socket
     listeningSocket.OpenSock(30000, true);
 
     packetAckMaintence = GenerateScratchAck();
 
-    char recieveBuf[30];
-    int size = 30;
+    char recieveBuf[40];
+    int size = 40;
 
     isHeartBeatActive = true;
 
-    std::thread heartBeatWorker(SendHeartBeat); //start heart beat on new thread
+    //std::thread heartBeatWorker(&Server::SendHeartBeat, this); //start heart beat on new thread
 
-    while (true)
+    while (!shutDownRequested)
     {
-        Address* address = CreateAddress();
-        int recievedBytes = listeningSocket.Receive(*address, recieveBuf, size);
+        Address address = *CreateAddress();
+        int recievedBytes = listeningSocket.Receive(address, recieveBuf, size);
 
         //have recieved any packets?
         if (recievedBytes > 0)
         {
-            unsigned int from_address = ntohl(address->GetAddressFromSockAddrIn());
-            unsigned int from_port = ntohs(address->GetPortFromSockAddrIn());
+            unsigned int from_address = ntohl(address.GetAddressFromSockAddrIn());
+            unsigned int from_port = ntohs(address.GetPortFromSockAddrIn());
 
             //find if we need to assign a new client
             ClientRecord* currentClient = nullptr; //creating a new clientRecord on the stack
-            int clientConnectionStatus = DetermineClient(address, currentClient);
+            int clientConnectionStatus = DetermineClient(&address, currentClient);
+            Snapshot* initialSnap = CreateEmptySnapShot();
 
             //how do we handle the code received
             switch (clientConnectionStatus)
@@ -44,14 +53,17 @@ void Server::MainProcess()
                 continue;
 
             case 1:
-                Snapshot* initialSnap = CreateEmptySnapShot();
+                
                 currentClient->clientSSRecordKeeper->InsertNewRecord(0, *initialSnap);
+               
                 break;
             default:
                 break;
             }
             
+            delete initialSnap; //no need for initial snap anymore
 
+            //processing recieved packet
             ScratchPacketHeader recvHeader = *InitEmptyPacketHeader();
             Payload recievedPayload = *CreateEmptyPayload();
 
@@ -61,11 +73,12 @@ void Server::MainProcess()
 
             DeconstructPacket(recieveBuf, recvHeader, recievedPayload);
 
-            char tempbuf[13] = { 0 };
+            const int tBufSize = 17;
+            char tempbuf[tBufSize] = { 0 };
             int payloadLoco = sizeof(recvHeader);
-            memcpy(&tempbuf, &recieveBuf[payloadLoco], 13);
+            memcpy(&tempbuf, &recieveBuf[payloadLoco], tBufSize);
 
-            if (!CompareCRC(recvHeader, tempbuf, 13))
+            if (!CompareCRC(recvHeader, tempbuf, tBufSize))
             {
                 std::cout << "Failed CRC Check" << std::endl;
                 continue;
@@ -92,8 +105,8 @@ void Server::MainProcess()
 
             //apply changes to other clients 
             
-            Snapshot extractedChanges = Snapshot();
-            Snapshot newBaseline = Snapshot();
+            Snapshot* extractedChanges = new Snapshot();
+            Snapshot* newBaseline = new Snapshot();
 
 
             //update snapshot baseline
@@ -101,33 +114,37 @@ void Server::MainProcess()
             {
             case 11:
                 extractedChanges = DeconstructRelativePayload(recievedPayload);
-                newBaseline = ApplyChangesToSnapshot(*currentClient->clientSSRecordKeeper->baselineRecord.recordedSnapshot, extractedChanges);
-                currentClient->clientSSRecordKeeper->InsertNewRecord(recvHeader.sequence, newBaseline);
+                newBaseline = ApplyChangesToSnapshot(*currentClient->clientSSRecordKeeper->baselineRecord.recordedSnapshot, *extractedChanges);
+                currentClient->clientSSRecordKeeper->InsertNewRecord(recvHeader.sequence, *newBaseline);
                 
-                UpdateLocalNetworkedObjectsOnClientRecords(*currentClient, newBaseline); //update all the client record's networkedObject with this change 
+                UpdateLocalNetworkedObjectsOnClientRecords(*currentClient, *newBaseline); //update all the client record's networkedObject with this change 
 
-                ReplicatedChangeToOtherClients(*currentClient, extractedChanges, 11); //send the change to the other connected clients
+                ReplicatedChangeToOtherClients(*currentClient, *extractedChanges, 11); //send the change to the other connected clients
                 
                 break;
 
             case 12:
                 extractedChanges = DeconstructAbsolutePayload(recievedPayload);
-                currentClient->clientSSRecordKeeper->InsertNewRecord(recvHeader.sequence, extractedChanges);
+                currentClient->clientSSRecordKeeper->InsertNewRecord(recvHeader.sequence, *extractedChanges);
 
-                UpdateLocalNetworkedObjectsOnClientRecords(*currentClient, extractedChanges); //update all the client record's networkedObject with this change 
+                UpdateLocalNetworkedObjectsOnClientRecords(*currentClient, *extractedChanges); //update all the client record's networkedObject with this change 
              
-                ReplicatedChangeToOtherClients(*currentClient, extractedChanges, 12); //send the change to the other connected clients
+                ReplicatedChangeToOtherClients(*currentClient, *extractedChanges, 12); //send the change to the other connected clients
                 break;
             default:
                 break;
             }
+
+            //memory management
+            delete extractedChanges;
+            delete newBaseline;
 
 
            
             
 
             //send echo
-            int sendBytes = sendto(listeningSocket.GetSocket(), recieveBuf, size, 0, (SOCKADDR*)&address->sockAddr, sizeof(address->GetSockAddrIn()));
+            int sendBytes = sendto(listeningSocket.GetSocket(), recieveBuf, size, 0, (SOCKADDR*)&address.sockAddr, sizeof(address.GetSockAddrIn()));
 
             if (sendBytes == SOCKET_ERROR)
             {
@@ -137,7 +154,7 @@ void Server::MainProcess()
         }
     }
 
-    heartBeatWorker.join();
+    //heartBeatWorker.join();
     listeningSocket.Close();
 }
 
@@ -145,7 +162,7 @@ int Server::FindPlayer(Address player)
 {
     for (int i = 0; i < maxPlayers; i++)
     {
-        if (playerConnected[i] && *playerRecord[i].clientAddress == player) 
+        if (playerConnected[i] && *playerRecord[i]->clientAddress == player) 
         {
             return i;
         }
@@ -173,15 +190,15 @@ bool Server::IsClientConnected(int clientIndex)
 
 const Address& Server::GetClientAddress(int clientIndex)
 {
-    return *playerRecord[clientIndex].clientAddress;
+    return *playerRecord[clientIndex]->clientAddress;
 }
 
 ClientRecord& Server::GetClientRecord(int clientIndex)
 {
-    return playerRecord[clientIndex];
+    return *playerRecord[clientIndex];
 }
 
-bool Server::TryToAddPlayer(Address* potentialPlayer, ClientRecord* OUTRecord)
+bool Server::TryToAddPlayer(Address* potentialPlayer, ClientRecord*& OUTRecord)
 {
     int playerLoco = FindPlayer(*potentialPlayer);
 
@@ -199,18 +216,18 @@ bool Server::TryToAddPlayer(Address* potentialPlayer, ClientRecord* OUTRecord)
         return false;
     }
 
-    playerRecord[freeSpot] = ClientRecord(potentialPlayer);
+    playerRecord[freeSpot] = new ClientRecord(potentialPlayer);
     playerConnected[freeSpot] = true;
 
-    if(OUTRecord != NULL)
+    if(OUTRecord == nullptr)
     {
-        OUTRecord = &playerRecord[freeSpot];
+        OUTRecord = playerRecord[freeSpot];
     }
 
     return true;
 }
 
-int Server::DetermineClient(Address* clientAddress, ClientRecord* OUTRecord)
+int Server::DetermineClient(Address* clientAddress, ClientRecord*& OUTRecord)
 {
     ClientRecord newClient = ClientRecord(); //creating a new clientRecord on the stack
 
@@ -235,7 +252,7 @@ int Server::DetermineClient(Address* clientAddress, ClientRecord* OUTRecord)
     }
     else //long time connected
     {
-        *OUTRecord = playerRecord[index];
+        OUTRecord = playerRecord[index];
         return 0;
     }
     
@@ -283,7 +300,7 @@ void Server::ReplicateChangeGroupToAllClients()
             continue;
         }
 
-       char transmitBuf[30] = { 0 };
+       char transmitBuf[40] = { 0 };
 
         ClientRecord client = GetClientRecord(i);
 
@@ -292,11 +309,12 @@ void Server::ReplicateChangeGroupToAllClients()
             ScratchPacketHeader heartBeatHeader = ScratchPacketHeader(12, client.clientSSRecordKeeper->baselineRecord.packetSequence, client.packetAckMaintence->currentPacketSequence,
                 client.packetAckMaintence->mostRecentRecievedPacket, client.packetAckMaintence->GetAckBits(client.packetAckMaintence->mostRecentRecievedPacket));
 
-            Payload heartBeatPayload = ConstructAbsolutePayload(pair->second); //grabbing the value 
+            Payload* heartBeatPayload = ConstructAbsolutePayload(pair->second); //grabbing the value 
 
-            ConstructPacket(heartBeatHeader, heartBeatPayload, transmitBuf);
+            ConstructPacket(heartBeatHeader, *heartBeatPayload, transmitBuf);
 
-            int sentBytes = listeningSocket.Send(*client.clientAddress, transmitBuf, 30);
+            int sentBytes = listeningSocket.Send(*client.clientAddress, transmitBuf, 40);
+            delete heartBeatPayload;
         }
 
     }
@@ -311,19 +329,19 @@ void Server::ReplicateChangeToAllClients(Snapshot changes)
             continue;
         }
 
-       char transmitBuf[30] = { 0 };
+       char transmitBuf[40] = { 0 };
 
         ClientRecord& client = GetClientRecord(i);
 
         ScratchPacketHeader heartBeatHeader = ScratchPacketHeader(12, client.clientSSRecordKeeper->baselineRecord.packetSequence, client.packetAckMaintence->currentPacketSequence,
             client.packetAckMaintence->mostRecentRecievedPacket, client.packetAckMaintence->GetAckBits(client.packetAckMaintence->mostRecentRecievedPacket));
 
-        Payload heartBeatPayload = ConstructAbsolutePayload(changes); //grabbing the value 
+        Payload* heartBeatPayload = ConstructAbsolutePayload(changes); //grabbing the value 
 
-        ConstructPacket(heartBeatHeader, heartBeatPayload, transmitBuf);
+        ConstructPacket(heartBeatHeader, *heartBeatPayload, transmitBuf);
 
-        int sentBytes = listeningSocket.Send(*client.clientAddress, transmitBuf, 30);
-
+        int sentBytes = listeningSocket.Send(*client.clientAddress, transmitBuf, 40);
+        delete heartBeatPayload;
     }
 }
 
@@ -336,7 +354,7 @@ void Server::ReplicatedChangeToOtherClients(ClientRecord ClientSentChanges, Snap
             continue;
         }
 
-        char transmitBuf[30] = { 0 };
+        char transmitBuf[40] = { 0 };
 
         ClientRecord& client = GetClientRecord(i);
 
@@ -348,34 +366,34 @@ void Server::ReplicatedChangeToOtherClients(ClientRecord ClientSentChanges, Snap
         ScratchPacketHeader heartBeatHeader = ScratchPacketHeader(packetCode, client.clientSSRecordKeeper->baselineRecord.packetSequence, client.packetAckMaintence->currentPacketSequence,
             client.packetAckMaintence->mostRecentRecievedPacket, client.packetAckMaintence->GetAckBits(client.packetAckMaintence->mostRecentRecievedPacket));
 
-        Payload heartBeatPayload = ConstructAbsolutePayload(changes); //grabbing the value 
+        Payload* heartBeatPayload = ConstructAbsolutePayload(changes); //grabbing the value 
 
-        ConstructPacket(heartBeatHeader, heartBeatPayload, transmitBuf);
+        ConstructPacket(heartBeatHeader, *heartBeatPayload, transmitBuf);
 
-        int sentBytes = listeningSocket.Send(*client.clientAddress, transmitBuf, 30);
-
+        int sentBytes = listeningSocket.Send(*client.clientAddress, transmitBuf, 40);
+        delete heartBeatPayload;
     }
 }
 
 void Server::RelayClientPosition(ClientRecord client)
 {
-    char transmitBuf[30] = { 0 };
-
+    char transmitBuf[40] = { 0 };
 
     ScratchPacketHeader heartBeatHeader = ScratchPacketHeader(22, client.clientSSRecordKeeper->baselineRecord.packetSequence, client.packetAckMaintence->currentPacketSequence,
         client.packetAckMaintence->mostRecentRecievedPacket, client.packetAckMaintence->GetAckBits(client.packetAckMaintence->mostRecentRecievedPacket)); //sending a packet for the purpose of updating ACK
 
-    Payload heartBeatPayload = ConstructAbsolutePayload(*client.clientSSRecordKeeper->baselineRecord.recordedSnapshot); //grabbing the baseline record to send to client
+    Payload* heartBeatPayload = ConstructAbsolutePayload(*client.clientSSRecordKeeper->baselineRecord.recordedSnapshot); //grabbing the baseline record to send to client
 
-    ConstructPacket(heartBeatHeader, heartBeatPayload, transmitBuf);
+    ConstructPacket(heartBeatHeader, *heartBeatPayload, transmitBuf);
 
-    int sentBytes = listeningSocket.Send(*client.clientAddress, transmitBuf, 30);
+    int sentBytes = listeningSocket.Send(*client.clientAddress, transmitBuf, 40);
+    delete heartBeatPayload;
 }
 
 
 void Server::SendHeartBeat()
 {
-    while (isHeartBeatActive)
+    while (!shutDownRequested)
     {
         for (int i = 0; i < playerConnected.size(); i++)
         {
@@ -383,8 +401,6 @@ void Server::SendHeartBeat()
             {
                 continue;
             }
-
-            char transmitBuf[30] = { 0 };
 
             ClientRecord client = GetClientRecord(i); //grabbing a copy of the client record to prevent it from getting entangled with the main thread 
 

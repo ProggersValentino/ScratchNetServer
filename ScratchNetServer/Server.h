@@ -3,16 +3,23 @@
 #include "ScratchAck.h"
 #include "ClientRecord.h"
 
+#include <Windows.h>
 #include <vector>
 #include <array>
 #include <queue>
 #include <unordered_map>
+#include <atomic>
+
 
 const int maxPlayers = 4;
+
+extern std::atomic<bool> shutDownRequested;
 
 class Server
 {
 public:
+    Server();
+
     void MainProcess();
 
     //returns the position the player is located otherwise -1
@@ -22,7 +29,7 @@ public:
     const Address& GetClientAddress(int clientIndex);
     ClientRecord& GetClientRecord(int clientIndex);
 
-    bool TryToAddPlayer(Address* potentialPlayer, ClientRecord* OUTRecord = nullptr);
+    bool TryToAddPlayer(Address* potentialPlayer, ClientRecord*& OUTRecord);
 
     /// <summary>
     /// will return a code based of the connection status of the player 
@@ -34,7 +41,7 @@ public:
     /// 1 -> New player is connecting
     /// -1 -> Can't connect player to lobby
     /// </returns>
-    int DetermineClient(Address* clientAddress, ClientRecord* OUTRecord);
+    int DetermineClient(Address* clientAddress, ClientRecord*& OUTRecord);
 
     
     bool UpdateClientObjects(ClientRecord* clientToUpdate, Snapshot selectedObjectToUpdate);
@@ -56,6 +63,7 @@ public:
     //to send each client a packet to update the baseline under packet code 22 every 250ms 
     void SendHeartBeat();
 
+
     
 private:
     Socket listeningSocket;
@@ -68,7 +76,21 @@ private:
     int numOfConnectedClients;
 
     std::array<bool, maxPlayers> playerConnected;
-    std::array<ClientRecord, maxPlayers> playerRecord;
+    std::array<ClientRecord*, maxPlayers> playerRecord;
 
     bool isHeartBeatActive = false;
+    bool serverRunning = true;
+
+    static BOOL ConsoleHandler(DWORD signal) {
+        switch (signal) {
+        case CTRL_C_EVENT:
+        case CTRL_CLOSE_EVENT:
+            std::cout << "\nGracefully shutting down...\n";
+            shutDownRequested = true; // signal threads to stop
+            return TRUE;     // tell the OS you handled it
+        default:
+            return FALSE;
+        }
+    }
+
 };
