@@ -84,7 +84,7 @@ private:
     static BOOL ConsoleHandler(DWORD signal) {
         switch (signal) {
         case CTRL_C_EVENT:
-        case CTRL_CLOSE_EVENT:
+        /*case CTRL_CLOSE_EVENT:*/
             std::cout << "\nGracefully shutting down...\n";
             shutDownRequested = true; // signal threads to stop
             return TRUE;     // tell the OS you handled it

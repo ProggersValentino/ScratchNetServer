@@ -23,10 +23,10 @@ public:
 		clientSSRecordKeeper = InitRecordKeeper();
 	}
 
-	ClientRecord(Address* inputtedAddress)
+	ClientRecord(Address inputtedAddress): clientAddress(new Address()) //we only want the value not the raw ptr as it will just point back to variable on the stack which when changes it will also change this
 	{
 		//initialization of variables 
-		clientAddress = inputtedAddress;
+		*clientAddress = inputtedAddress; 
 		packetAckMaintence = GenerateScratchAck();
 		clientSSRecordKeeper = InitRecordKeeper();
 	}

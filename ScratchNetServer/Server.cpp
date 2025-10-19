@@ -6,6 +6,9 @@
 #include <thread>
 
 std::atomic<bool> shutDownRequested = false;
+const int safetyBuffer = 32;
+const int packetSize = 55;
+const int totalPacketSize = packetSize + safetyBuffer;
 
 Server::Server()
 {
@@ -23,12 +26,12 @@ void Server::MainProcess()
 
     packetAckMaintence = GenerateScratchAck();
 
-    char recieveBuf[40];
-    int size = 40;
+    char recieveBuf[totalPacketSize];
+    int size = totalPacketSize;
 
     isHeartBeatActive = true;
 
-    //std::thread heartBeatWorker(&Server::SendHeartBeat, this); //start heart beat on new thread
+    std::thread heartBeatWorker(&Server::SendHeartBeat, this); //start heart beat on new thread
 
     while (!shutDownRequested)
     {
@@ -73,7 +76,7 @@ void Server::MainProcess()
 
             DeconstructPacket(recieveBuf, recvHeader, recievedPayload);
 
-            const int tBufSize = 17;
+            const int tBufSize = 17 + safetyBuffer;
             char tempbuf[tBufSize] = { 0 };
             int payloadLoco = sizeof(recvHeader);
             memcpy(&tempbuf, &recieveBuf[payloadLoco], tBufSize);
@@ -144,17 +147,17 @@ void Server::MainProcess()
             
 
             //send echo
-            int sendBytes = sendto(listeningSocket.GetSocket(), recieveBuf, size, 0, (SOCKADDR*)&address.sockAddr, sizeof(address.GetSockAddrIn()));
+            //int sendBytes = sendto(listeningSocket.GetSocket(), recieveBuf, size, 0, (SOCKADDR*)&address.sockAddr, sizeof(address.GetSockAddrIn()));
 
-            if (sendBytes == SOCKET_ERROR)
+          /*  if (sendBytes == SOCKET_ERROR)
             {
                 printf("Error sending data with %d \n", WSAGetLastError());
                 continue;
-            }
+            }*/
         }
     }
 
-    //heartBeatWorker.join();
+    heartBeatWorker.join();
     listeningSocket.Close();
 }
 
@@ -216,7 +219,7 @@ bool Server::TryToAddPlayer(Address* potentialPlayer, ClientRecord*& OUTRecord)
         return false;
     }
 
-    playerRecord[freeSpot] = new ClientRecord(potentialPlayer);
+    playerRecord[freeSpot] = new ClientRecord(*potentialPlayer);
     playerConnected[freeSpot] = true;
 
     if(OUTRecord == nullptr)
@@ -300,7 +303,7 @@ void Server::ReplicateChangeGroupToAllClients()
             continue;
         }
 
-       char transmitBuf[40] = { 0 };
+       char transmitBuf[totalPacketSize] = { 0 };
 
         ClientRecord client = GetClientRecord(i);
 
@@ -313,7 +316,7 @@ void Server::ReplicateChangeGroupToAllClients()
 
             ConstructPacket(heartBeatHeader, *heartBeatPayload, transmitBuf);
 
-            int sentBytes = listeningSocket.Send(*client.clientAddress, transmitBuf, 40);
+            int sentBytes = listeningSocket.Send(*client.clientAddress, transmitBuf, totalPacketSize);
             delete heartBeatPayload;
         }
 
@@ -328,8 +331,8 @@ void Server::ReplicateChangeToAllClients(Snapshot changes)
         {
             continue;
         }
-
-       char transmitBuf[40] = { 0 };
+        const int tSize = totalPacketSize;
+        char transmitBuf[tSize] = { 0 };
 
         ClientRecord& client = GetClientRecord(i);
 
@@ -340,7 +343,10 @@ void Server::ReplicateChangeToAllClients(Snapshot changes)
 
         ConstructPacket(heartBeatHeader, *heartBeatPayload, transmitBuf);
 
-        int sentBytes = listeningSocket.Send(*client.clientAddress, transmitBuf, 40);
+        Address address = *client.clientAddress;
+
+        //int sentBytes = listeningSocket.Send(*client.clientAddress, transmitBuf, 55 + safetyBuffer); //TODO: Fix address to be able to be used to send back to a sender
+        int sendBytes = sendto(listeningSocket.GetSocket(), transmitBuf, tSize, 0, (SOCKADDR*)&address.sockAddr, sizeof(address.GetSockAddrIn()));
         delete heartBeatPayload;
     }
 }
@@ -354,7 +360,7 @@ void Server::ReplicatedChangeToOtherClients(ClientRecord ClientSentChanges, Snap
             continue;
         }
 
-        char transmitBuf[40] = { 0 };
+        char transmitBuf[totalPacketSize] = { 0 };
 
         ClientRecord& client = GetClientRecord(i);
 
@@ -370,14 +376,15 @@ void Server::ReplicatedChangeToOtherClients(ClientRecord ClientSentChanges, Snap
 
         ConstructPacket(heartBeatHeader, *heartBeatPayload, transmitBuf);
 
-        int sentBytes = listeningSocket.Send(*client.clientAddress, transmitBuf, 40);
+        int sentBytes = listeningSocket.Send(*client.clientAddress, transmitBuf, totalPacketSize);
         delete heartBeatPayload;
     }
 }
 
 void Server::RelayClientPosition(ClientRecord client)
 {
-    char transmitBuf[40] = { 0 };
+    const int tSize = totalPacketSize;
+    char transmitBuf[tSize] = { 0 };
 
     ScratchPacketHeader heartBeatHeader = ScratchPacketHeader(22, client.clientSSRecordKeeper->baselineRecord.packetSequence, client.packetAckMaintence->currentPacketSequence,
         client.packetAckMaintence->mostRecentRecievedPacket, client.packetAckMaintence->GetAckBits(client.packetAckMaintence->mostRecentRecievedPacket)); //sending a packet for the purpose of updating ACK
@@ -386,7 +393,11 @@ void Server::RelayClientPosition(ClientRecord client)
 
     ConstructPacket(heartBeatHeader, *heartBeatPayload, transmitBuf);
 
-    int sentBytes = listeningSocket.Send(*client.clientAddress, transmitBuf, 40);
+    Address address = *client.clientAddress; //derefernced value
+
+    //int sentBytes = listeningSocket.Send(address, transmitBuf, 55 + safetyBuffer);
+    int sendBytes = sendto(listeningSocket.GetSocket(), transmitBuf, tSize, 0, (SOCKADDR*)&address.sockAddr, sizeof(address.GetSockAddrIn()));
+    
     delete heartBeatPayload;
 }
 
